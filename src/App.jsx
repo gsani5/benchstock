@@ -30,6 +30,9 @@ const toItem = (d) => ({
   location:d.location||null, expiration_date:d.expirationDate||null, notes:d.notes||null, created_by:d.createdBy||null,
 });
 const fromLog = (r) => ({ id:r.id, name:r.name, lot:r.lot, amount:Number(r.amount), unit:r.unit, who:r.who, ts:new Date(r.ts).getTime() });
+const fromSlide = (r) => ({ id:r.id, subjectId:r.subject_id||"", species:r.species||"Mouse", region:r.region||"", staining:r.staining||"Unstained", bigBox:r.big_box||"", box:r.box||"", notes:r.notes||"", createdBy:r.created_by||"", createdAt:r.created_at });
+const toSlide = (d) => ({ subject_id:d.subjectId||null, species:d.species, region:d.region||null, staining:d.staining||"Unstained", big_box:d.bigBox||null, box:d.box||null, notes:d.notes||null, created_by:d.createdBy||null });
+const fromSlideLog = (r) => ({ id:r.id, subjectId:r.subject_id, region:r.region, fromStain:r.from_stain, toStain:r.to_stain, who:r.who, ts:new Date(r.ts).getTime() });
 
 /* --------------------------- Code 39 ------------------------------ */
 const C39={ "0":"nnnwwnwnn","1":"wnnwnnnnw","2":"nnwwnnnnw","3":"wnwwnnnnn","4":"nnnwwnnnw","5":"wnnwwnnnn","6":"nnwwwnnnn","7":"nnnwnnwnw","8":"wnnwnnwnn","9":"nnwwnnwnn","A":"wnnnnwnnw","B":"nnwnnwnnw","C":"wnwnnwnnn","D":"nnnnwwnnw","E":"wnnnwwnnn","F":"nnwnwwnnn","G":"nnnnnwwnw","H":"wnnnnwwnn","I":"nnwnnwwnn","J":"nnnnwwwnn","K":"wnnnnnnww","L":"nnwnnnnww","M":"wnwnnnnwn","N":"nnnnwnnww","O":"wnnnwnnwn","P":"nnwnwnnwn","Q":"nnnnnnwww","R":"wnnnnnwwn","S":"nnwnnnwwn","T":"nnnnwnwwn","U":"wwnnnnnnw","V":"nwwnnnnnw","W":"wwwnnnnnn","X":"nwnnwnnnw","Y":"wwnnwnnnn","Z":"nwwnwnnnn","-":"nwnnnnwnw",".":"wwnnnnwnn"," ":"nwwnnnwnn","$":"nwnwnwnnn","/":"nwnwnnnwn","+":"nwnnnwnwn","%":"nnnwnwnwn","*":"nwnnwnwnn" };
@@ -56,6 +59,8 @@ export default function App(){
   const [items,setItems]=useState([]);
   const [log,setLog]=useState([]);
   const [members,setMembers]=useState([]);
+  const [slides,setSlides]=useState([]);
+  const [slideLog,setSlideLog]=useState([]);
 
   const [view,setView]=useState("dashboard");
   const [query,setQuery]=useState("");
@@ -63,6 +68,8 @@ export default function App(){
   const [editing,setEditing]=useState(null);
   const [labelItem,setLabelItem]=useState(null);
   const [consumeItem,setConsumeItem]=useState(null);
+  const [editingSlide,setEditingSlide]=useState(null);
+  const [stainSlide,setStainSlide]=useState(null);
 
   // auth bootstrap
   useEffect(()=>{
@@ -74,6 +81,8 @@ export default function App(){
   async function loadItems(){ const { data } = await supabase.from("items").select("*").order("created_at",{ascending:false}); setItems((data||[]).map(fromItem)); }
   async function loadLog(){ const { data } = await supabase.from("usage_log").select("*").order("ts",{ascending:false}).limit(300); setLog((data||[]).map(fromLog)); }
   async function loadMembers(){ const { data } = await supabase.from("profiles").select("*").order("created_at"); setMembers(data||[]); }
+  async function loadSlides(){ const { data } = await supabase.from("slides").select("*").order("created_at",{ascending:false}); setSlides((data||[]).map(fromSlide)); }
+  async function loadSlideLog(){ const { data } = await supabase.from("slide_log").select("*").order("ts",{ascending:false}).limit(200); setSlideLog((data||[]).map(fromSlideLog)); }
 
   // when signed in: ensure profile, load data, subscribe to live changes
   useEffect(()=>{
@@ -84,12 +93,14 @@ export default function App(){
     setMe({ id:u.id, email:u.email, displayName });
     (async()=>{
       await supabase.from("profiles").upsert({ id:u.id, display_name:displayName }, { onConflict:"id" });
-      await Promise.all([loadItems(), loadLog(), loadMembers()]);
+      await Promise.all([loadItems(), loadLog(), loadMembers(), loadSlides(), loadSlideLog()]);
     })();
     const ch = supabase.channel("benchstock-live")
       .on("postgres_changes",{event:"*",schema:"public",table:"items"}, loadItems)
       .on("postgres_changes",{event:"*",schema:"public",table:"usage_log"}, loadLog)
       .on("postgres_changes",{event:"*",schema:"public",table:"profiles"}, loadMembers)
+      .on("postgres_changes",{event:"*",schema:"public",table:"slides"}, loadSlides)
+      .on("postgres_changes",{event:"*",schema:"public",table:"slide_log"}, loadSlideLog)
       .subscribe();
     return ()=>supabase.removeChannel(ch);
   },[session]);
@@ -107,6 +118,19 @@ export default function App(){
     setConsumeItem(null); loadItems(); loadLog();
   }
   async function signOut(){ await supabase.auth.signOut(); setView("dashboard"); }
+
+  async function upsertSlide(data){
+    if(data.id){ await supabase.from("slides").update(toSlide(data)).eq("id",data.id); }
+    else { await supabase.from("slides").insert({ ...toSlide(data), created_by:me.displayName }); }
+    setEditingSlide(null); loadSlides();
+  }
+  async function removeSlide(id){ await supabase.from("slides").delete().eq("id",id); loadSlides(); }
+  async function recordStain(slide, newStain){
+    const from = slide.staining || "Unstained";
+    await supabase.from("slides").update({ staining:newStain }).eq("id",slide.id);
+    await supabase.from("slide_log").insert({ slide_id:slide.id, subject_id:slide.subjectId, region:slide.region, from_stain:from, to_stain:newStain, who:me.displayName });
+    setStainSlide(null); loadSlides(); loadSlideLog();
+  }
 
   const filtered = useMemo(()=>{ const q=query.trim().toLowerCase();
     return items.filter(it=>{ if(catFilter!=="All" && it.category!==catFilter) return false;
@@ -152,7 +176,7 @@ export default function App(){
       </header>
 
       <nav style={styles.tabs}>
-        {[["dashboard","Dashboard"],["inventory","Inventory"],["log","Usage log"],["members","Members"]].map(([k,l])=>(
+        {[["dashboard","Dashboard"],["inventory","Inventory"],["histology","Histology slides"],["log","Usage log"],["members","Members"]].map(([k,l])=>(
           <button key={k} onClick={()=>setView(k)} className="bs-tab" style={{...styles.tab, color:view===k?T.ink:T.inkSoft, borderBottom:view===k?`2px solid ${T.teal}`:"2px solid transparent"}}>
             {l}{k==="dashboard"&&totalAlerts>0&&<span style={styles.tabBadge}>{totalAlerts}</span>}
           </button>
@@ -164,6 +188,7 @@ export default function App(){
       <main style={styles.main}>
         {view==="dashboard" && <Dashboard items={items} alerts={alerts} memberCount={members.length} onOpen={it=>{setQuery(it.name);setView("inventory");}}/>}
         {view==="inventory" && <Inventory items={filtered} catFilter={catFilter} setCatFilter={setCatFilter} onEdit={setEditing} onDelete={remove} onLabel={setLabelItem} onConsume={setConsumeItem}/>}
+        {view==="histology" && <Histology slides={slides} slideLog={slideLog} onAdd={()=>setEditingSlide({})} onEdit={setEditingSlide} onDelete={removeSlide} onStain={setStainSlide}/>}
         {view==="log" && <UsageLog log={log}/>}
         {view==="members" && <Members members={members} me={me}/>}
       </main>
@@ -171,6 +196,8 @@ export default function App(){
       {editing && <ItemForm initial={editing} onSave={upsert} onClose={()=>setEditing(null)}/>}
       {labelItem && <LabelModal item={labelItem} onClose={()=>setLabelItem(null)}/>}
       {consumeItem && <ConsumeModal item={consumeItem} user={me} onConsume={consume} onClose={()=>setConsumeItem(null)}/>}
+      {editingSlide && <SlideForm initial={editingSlide} onSave={upsertSlide} onClose={()=>setEditingSlide(null)}/>}
+      {stainSlide && <StainModal slide={stainSlide} user={me} onConfirm={recordStain} onClose={()=>setStainSlide(null)}/>}
     </div>
   );
 }
@@ -445,6 +472,120 @@ function LabelModal({ item, onClose }){
         <button className="bs-btn-primary" onClick={()=>window.print()}>Print label</button>
       </div>
       <div style={{...styles.itemMeta, marginTop:8, textAlign:"center"}}>Real Code 39 symbology — scannable with any barcode reader.</div>
+    </Modal>
+  );
+}
+
+/* ------------------------- Histology ------------------------------ */
+function Histology({ slides, slideLog, onAdd, onEdit, onDelete, onStain }){
+  const [species,setSpecies]=useState("All");
+  const [q,setQ]=useState("");
+  const list = slides.filter(s=>{
+    if(species!=="All" && s.species!==species) return false;
+    const t=q.trim().toLowerCase(); if(!t) return true;
+    return [s.subjectId,s.region,s.staining,s.bigBox,s.box].filter(Boolean).join(" ").toLowerCase().includes(t);
+  });
+  const isUnstained = (s)=> !s.staining || s.staining.toLowerCase()==="unstained";
+  return (
+    <div>
+      <div style={{display:"flex", gap:10, flexWrap:"wrap", alignItems:"center", marginBottom:14}}>
+        <div style={styles.filterBar}>
+          {["All","Mouse","Human"].map(c=>(
+            <button key={c} onClick={()=>setSpecies(c)} className="bs-chip"
+              style={{...styles.chip, background:species===c?T.ink:"transparent", color:species===c?"#fff":T.inkSoft, borderColor:species===c?T.ink:T.line}}>{c}</button>
+          ))}
+        </div>
+        <input className="bs-input" placeholder="Search subject, region, staining, box…" value={q} onChange={e=>setQ(e.target.value)} style={{flex:1, minWidth:180, maxWidth:360}}/>
+        <div style={{flex:1}}/>
+        <button className="bs-btn-primary" onClick={onAdd}>+ Add slide</button>
+      </div>
+
+      {list.length===0 ? <div style={{...styles.panel,...styles.empty}}>No slides yet. Click “Add slide” to log one.</div> : (
+        <div style={styles.tableWrap}>
+          <table style={styles.table}>
+            <thead><tr>
+              <th style={styles.th}>Subject ID</th><th style={styles.th}>Species</th><th style={styles.th}>Region</th>
+              <th style={styles.th}>Staining</th><th style={styles.th}>Location</th>
+              <th style={{...styles.th,textAlign:"right"}}>Actions</th>
+            </tr></thead>
+            <tbody>
+              {list.map(s=>(
+                <tr key={s.id} className="bs-row">
+                  <td style={{...styles.td, fontFamily:"var(--mono)", fontWeight:600, fontSize:12.5}}>{s.subjectId||"—"}</td>
+                  <td style={styles.td}><span style={{...styles.pill, color:s.species==="Human"?T.teal:T.inkSoft, background:s.species==="Human"?T.greenBg:T.paper}}>{s.species}</span></td>
+                  <td style={styles.td}>{s.region||"—"}</td>
+                  <td style={styles.td}><span style={{...styles.pill, color:isUnstained(s)?T.amber:T.green, background:isUnstained(s)?T.amberBg:T.greenBg}}>{s.staining||"Unstained"}</span></td>
+                  <td style={{...styles.td, fontSize:12, color:T.inkSoft}}>{[s.bigBox,s.box].filter(Boolean).join(" · ")||"—"}</td>
+                  <td style={{...styles.td, textAlign:"right", whiteSpace:"nowrap"}}>
+                    <button className="bs-act" onClick={()=>onStain(s)}>Stain</button>
+                    <button className="bs-act" onClick={()=>onEdit(s)}>Edit</button>
+                    <button className="bs-act bs-act-danger" onClick={()=>onDelete(s.id)}>✕</button>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+
+      {slideLog.length>0 && (
+        <div style={{...styles.panel, marginTop:16}}>
+          <div style={styles.panelHead}>Staining history</div>
+          {slideLog.slice(0,12).map(e=>(
+            <div key={e.id} style={{display:"flex", alignItems:"center", gap:10, padding:"8px 0", borderTop:`1px solid ${T.line}`}}>
+              <div style={{flex:1, minWidth:0}}>
+                <div style={{fontSize:13, fontWeight:600}}>{e.subjectId||"—"} · {e.region||"—"}</div>
+                <div style={{fontSize:12, color:T.inkSoft}}>{e.fromStain} → <strong style={{color:T.ink}}>{e.toStain}</strong> · {e.who}</div>
+              </div>
+              <span style={{fontSize:11.5, color:T.inkSoft, fontFamily:"var(--mono)"}}>{new Date(e.ts).toLocaleDateString()}</span>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function SlideForm({ initial, onSave, onClose }){
+  const [f,setF]=useState({ subjectId:"", species:"Mouse", region:"", staining:"Unstained", bigBox:"", box:"", notes:"", ...initial });
+  const [busy,setBusy]=useState(false);
+  const set=k=>e=>setF({...f,[k]:e.target.value});
+  const valid=f.subjectId.trim().length>0;
+  async function submit(){ if(!valid) return; setBusy(true); await onSave(f); setBusy(false); }
+  return (
+    <Modal title={initial.id?"Edit slide":"Add histology slide"} onClose={onClose} wide>
+      <div style={styles.formGrid}>
+        <Field label="Subject ID"><input className="bs-input" value={f.subjectId} onChange={set("subjectId")} placeholder="e.g. NEC-042" autoFocus/></Field>
+        <Field label="Species"><select className="bs-input" value={f.species} onChange={set("species")}><option>Mouse</option><option>Human</option></select></Field>
+        <Field label="Brain region" span={2}><input className="bs-input" value={f.region} onChange={set("region")} placeholder="e.g. Cerebellum, pons, PFC"/></Field>
+        <Field label="Staining (type freely)"><input className="bs-input" value={f.staining} onChange={set("staining")} placeholder="Unstained, H&E, IHC anti-TNFα…"/></Field>
+        <Field label="Big box"><input className="bs-input" value={f.bigBox} onChange={set("bigBox")} placeholder="Big box 1"/></Field>
+        <Field label="Box (slide book)"><input className="bs-input" value={f.box} onChange={set("box")} placeholder="Box A / page 3"/></Field>
+        <Field label="Notes"><input className="bs-input" value={f.notes} onChange={set("notes")} placeholder="Optional"/></Field>
+      </div>
+      <div style={styles.modalActions}>
+        <button className="bs-btn-ghost" onClick={onClose}>Cancel</button>
+        <button className="bs-btn-primary" onClick={submit} disabled={!valid||busy} style={{opacity:valid?1:.5}}>{busy?"…":initial.id?"Save changes":"Add slide"}</button>
+      </div>
+    </Modal>
+  );
+}
+
+function StainModal({ slide, user, onConfirm, onClose }){
+  const [stain,setStain]=useState(""); const [busy,setBusy]=useState(false);
+  async function go(){ if(!stain.trim()) return; setBusy(true); await onConfirm(slide, stain.trim()); setBusy(false); }
+  return (
+    <Modal title="Record staining" onClose={onClose}>
+      <div style={{marginBottom:14}}>
+        <div style={styles.itemName}>{slide.subjectId} · {slide.region||"—"}</div>
+        <div style={styles.itemMeta}>{slide.species} · currently <strong>{slide.staining||"Unstained"}</strong></div>
+      </div>
+      <Field label="New staining (type freely)"><input className="bs-input" value={stain} onChange={e=>setStain(e.target.value)} placeholder="e.g. H&E, IHC anti-TNFα, Nissl" autoFocus onKeyDown={e=>e.key==="Enter"&&go()}/></Field>
+      <div style={{...styles.itemMeta, marginTop:10}}>Logged as <strong>{user.displayName}</strong>. This updates the slide and records the change in staining history.</div>
+      <div style={styles.modalActions}>
+        <button className="bs-btn-ghost" onClick={onClose}>Cancel</button>
+        <button className="bs-btn-primary" onClick={go} disabled={!stain.trim()||busy}>{busy?"…":"Record staining"}</button>
+      </div>
     </Modal>
   );
 }
